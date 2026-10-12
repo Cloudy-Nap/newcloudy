@@ -1,0 +1,794 @@
+'use client';
+
+import React, { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import {
+  FiUsers,
+  FiRefreshCw,
+  FiSearch,
+  FiArrowLeft,
+  FiAlertTriangle,
+  FiMail,
+  FiPhone,
+  FiMapPin,
+  FiUser,
+  FiX,
+  FiPackage,
+  FiCalendar,
+  FiDollarSign,
+  FiPlus,
+} from 'react-icons/fi';
+import { API_BASE } from '../../lib/apiBase';
+
+const PAGE_SIZE = 5;
+
+const sanitizeUser = (user) => {
+  if (!user) return null;
+
+  const firstName = user.first_name || user.firstName || '';
+  const lastName = user.last_name || user.lastName || '';
+  const fullName = user.full_name || user.fullName || user.name || `${firstName} ${lastName}`.trim();
+
+  return {
+    id: user.id?.toString?.() ?? user.id,
+    fullName: fullName && fullName.trim() ? fullName.trim() : 'Unnamed User',
+    email: user.email || user.user_email || 'Not provided',
+    phone: user.phone || user.contact || 'Not provided',
+    address: user.address || user.shipping_address || user.billing_address || 'Not provided',
+    orders: Number(user.totalorders ?? user.orders ?? 0) || 0,
+    status: user.status || 'active',
+    createdAt: user.created_at || user.createdAt || null,
+    raw: user,
+  };
+};
+
+const CmsCustomersPage = () => {
+  const router = useRouter();
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [page, setPage] = useState(1);
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [userOrders, setUserOrders] = useState([]);
+  const [loadingOrders, setLoadingOrders] = useState(false);
+  const [ordersPage, setOrdersPage] = useState(1);
+  const ORDERS_PER_PAGE = 3;
+  const [addModalOpen, setAddModalOpen] = useState(false);
+  const [addSubmitting, setAddSubmitting] = useState(false);
+  const [addError, setAddError] = useState('');
+  const [addMessage, setAddMessage] = useState('');
+  const [newCustomer, setNewCustomer] = useState({
+    firstName: '',
+    lastName: '',
+    email: '',
+    password: '',
+    phone: '',
+    address: '',
+  });
+
+  const cmsHeaders = () => {
+    if (typeof window === 'undefined') return {};
+    const cmsUser = JSON.parse(window.localStorage.getItem('cmsUser') || '{}');
+    return {
+      'Content-Type': 'application/json',
+      'X-CMS-User-Id': String(cmsUser.id || ''),
+      'X-CMS-User-Name': String(cmsUser.username || cmsUser.user_name || ''),
+      'X-CMS-User-Role': String(cmsUser.role || ''),
+    };
+  };
+
+  const fetchUsers = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const response = await fetch(`${API_BASE}/api/users`);
+      if (!response.ok) throw new Error('Failed to load customers');
+      const data = await response.json();
+      const normalized = Array.isArray(data)
+        ? data.map((entry) => sanitizeUser(entry)).filter(Boolean)
+        : [];
+      setUsers(normalized);
+    } catch (err) {
+      console.error('CMS customers fetch error:', err);
+      setError(err.message || 'Failed to load customers.');
+      setUsers([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const storedUser = window.localStorage.getItem('cmsUser');
+    const storedSession = window.localStorage.getItem('cmsSession');
+
+    if (!storedUser || !storedSession) {
+      router.replace('/cms/auth/login');
+    }
+  }, [router]);
+
+  useEffect(() => {
+    fetchUsers();
+  }, []);
+
+  const resetAddForm = () => {
+    setNewCustomer({
+      firstName: '',
+      lastName: '',
+      email: '',
+      password: '',
+      phone: '',
+      address: '',
+    });
+    setAddError('');
+    setAddMessage('');
+  };
+
+  const openAddModal = () => {
+    resetAddForm();
+    setAddModalOpen(true);
+  };
+
+  const closeAddModal = () => {
+    if (addSubmitting) return;
+    setAddModalOpen(false);
+    resetAddForm();
+  };
+
+  const handleNewCustomerChange = (field) => (event) => {
+    setNewCustomer((prev) => ({ ...prev, [field]: event.target.value }));
+  };
+
+  const handleCreateCustomer = async (event) => {
+    event.preventDefault();
+    setAddError('');
+    setAddMessage('');
+
+    if (!newCustomer.email.trim()) {
+      setAddError('Email is required.');
+      return;
+    }
+
+    if (!newCustomer.password || newCustomer.password.length < 6) {
+      setAddError('Password must be at least 6 characters.');
+      return;
+    }
+
+    try {
+      setAddSubmitting(true);
+      const response = await fetch(`${API_BASE}/api/users`, {
+        method: 'POST',
+        headers: cmsHeaders(),
+        body: JSON.stringify({
+          firstName: newCustomer.firstName.trim(),
+          lastName: newCustomer.lastName.trim(),
+          email: newCustomer.email.trim(),
+          password: newCustomer.password,
+          phone: newCustomer.phone.trim() || undefined,
+          address: newCustomer.address.trim() || undefined,
+        }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to create customer.');
+      }
+
+      const created = sanitizeUser(payload.user);
+      if (created) {
+        setUsers((prev) => [created, ...prev]);
+      } else {
+        await fetchUsers();
+      }
+
+      setAddMessage('Customer created successfully.');
+      setTimeout(() => {
+        closeAddModal();
+      }, 700);
+    } catch (err) {
+      console.error('Create customer error:', err);
+      setAddError(err.message || 'Failed to create customer.');
+    } finally {
+      setAddSubmitting(false);
+    }
+  };
+
+  const filteredUsers = useMemo(() => {
+    return users.filter((user) => {
+      if (!searchTerm) return true;
+      const lower = searchTerm.toLowerCase();
+      return (
+        user.fullName.toLowerCase().includes(lower) ||
+        user.email.toLowerCase().includes(lower) ||
+        user.address.toLowerCase().includes(lower)
+      );
+    });
+  }, [users, searchTerm]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+
+  const paginatedUsers = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filteredUsers.slice(start, start + PAGE_SIZE);
+  }, [filteredUsers, currentPage]);
+
+  const handlePageChange = (nextPage) => {
+    if (nextPage < 1 || nextPage > totalPages) return;
+    setPage(nextPage);
+  };
+
+  const handleUserClick = async (user) => {
+    setSelectedUser(user);
+    setOrdersPage(1);
+    setLoadingOrders(true);
+    setUserOrders([]);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/orders?userId=${user.id}`);
+      if (!response.ok) throw new Error('Failed to load orders');
+      const data = await response.json();
+      const orders = Array.isArray(data) ? data : [];
+      setUserOrders(orders);
+    } catch (err) {
+      console.error('Failed to fetch user orders:', err);
+      setUserOrders([]);
+    } finally {
+      setLoadingOrders(false);
+    }
+  };
+
+  const closeModal = () => {
+    setSelectedUser(null);
+    setUserOrders([]);
+    setOrdersPage(1);
+  };
+
+  const formatCurrency = (value) => {
+    const numeric = Number(value || 0);
+    return `PKR ${numeric.toLocaleString('en-PK')}`;
+  };
+
+  const normalizeStatus = (status) => {
+    if (!status) return 'pending';
+    const normalized = status.toString().toLowerCase();
+    if (normalized.includes('cancel')) return 'cancelled';
+    if (normalized.includes('complete')) return 'completed';
+    if (normalized.includes('process')) return 'processing';
+    return 'pending';
+  };
+
+  const getStatusColor = (status) => {
+    const normalized = normalizeStatus(status);
+    const colors = {
+      pending: 'bg-orange-500/20 text-orange-300 border-orange-500/30',
+      processing: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
+      completed: 'bg-green-500/20 text-green-300 border-green-500/30',
+      cancelled: 'bg-red-500/20 text-red-300 border-red-500/30',
+    };
+    return colors[normalized] || colors.pending;
+  };
+
+  const totalOrdersPages = Math.max(1, Math.ceil(userOrders.length / ORDERS_PER_PAGE));
+  const paginatedOrders = useMemo(() => {
+    const start = (ordersPage - 1) * ORDERS_PER_PAGE;
+    return userOrders.slice(start, start + ORDERS_PER_PAGE);
+  }, [userOrders, ordersPage]);
+
+  return (
+    <div className="relative min-h-screen text-slate-900">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(96,165,250,0.20),transparent_55%)] opacity-80 pointer-events-none" />
+
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 py-10 space-y-8">
+        <header className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="inline-flex items-center gap-2 text-xs font-semibold tracking-[0.35em] uppercase text-slate-600">
+              <FiUsers className="text-blue-600" /> Customers
+            </p>
+            <h1 className="mt-2 text-3xl font-semibold text-slate-900">Customer Directory</h1>
+            <p className="mt-1 text-sm text-slate-600">
+              Browse every user registered on your hi-tech storefront. Use search and pagination to manage your customer base.
+            </p>
+          </div>
+          <div className="flex gap-3 items-center">
+            <button
+              type="button"
+              onClick={openAddModal}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg transition shadow-lg shadow-emerald-500/20"
+            >
+              <FiPlus />
+              Add customer
+            </button>
+            <Link
+              href="/cms/dashboard"
+              className="inline-flex items-center gap-2 px-4 py-2.5 border border-slate-200 rounded-lg text-sm font-semibold text-slate-800 hover:bg-slate-100 transition shadow-lg shadow-black/10"
+            >
+              <FiArrowLeft />
+              Back to dashboard
+            </Link>
+            <button
+              onClick={fetchUsers}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-linear-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white text-sm font-semibold rounded-lg transition shadow-lg shadow-blue-500/20"
+            >
+              <FiRefreshCw className={loading ? 'animate-spin' : ''} />
+              Refresh
+            </button>
+          </div>
+        </header>
+
+        <section className="rounded-3xl border border-slate-200 bg-slate-100 backdrop-blur-3xl shadow-2xl p-6 sm:p-8 space-y-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-3 bg-slate-100 border border-slate-200 rounded-xl px-4 py-3">
+              <FiSearch className="text-slate-600" />
+              <input
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                placeholder="Search by name, email, or address..."
+                className="bg-transparent text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none"
+              />
+            </div>
+            <div className="text-xs text-slate-600">
+              Showing {paginatedUsers.length} of {filteredUsers.length} customers
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            {loading && (
+              <div className="flex flex-col items-center justify-center gap-3 py-16 text-slate-600">
+                <FiRefreshCw className="animate-spin text-2xl" />
+                <p className="text-sm">Loading customers...</p>
+              </div>
+            )}
+
+            {error && !loading && (
+              <div className="border border-red-400/30 bg-red-500/10 text-red-800 rounded-2xl p-6 flex gap-3 items-start">
+                <FiAlertTriangle className="mt-1 text-xl" />
+                <div>
+                  <p className="text-sm font-semibold">Unable to load customers</p>
+                  <p className="text-xs mt-1">{error}</p>
+                </div>
+              </div>
+            )}
+
+            {!loading && !error && filteredUsers.length === 0 && (
+              <div className="border border-slate-200 bg-slate-50 text-slate-700 rounded-2xl p-6">
+                <p className="text-sm font-semibold">No users found.</p>
+                <p className="text-xs mt-1">Try adjusting your search query.</p>
+              </div>
+            )}
+
+            {!loading &&
+              !error &&
+              paginatedUsers.map((user) => (
+                <article
+                  key={user.id}
+                  onClick={() => handleUserClick(user)}
+                  className="relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 backdrop-blur-xl shadow-xl cursor-pointer hover:border-slate-200 hover:bg-slate-200 transition"
+                >
+                  <div className="absolute inset-0 bg-linear-to-br from-white/10 via-transparent to-white/5 opacity-45 pointer-events-none" />
+                  <div className="relative p-6 grid gap-4 md:grid-cols-[1.5fr_1fr]">
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-3">
+                        <div className="h-11 w-11 rounded-full bg-white/15 flex items-center justify-center text-slate-700">
+                          <FiUser />
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900">{user.fullName}</p>
+                          <p className="text-xs text-slate-600">User ID: {user.id}</p>
+                        </div>
+                      </div>
+
+                      <div className="grid sm:grid-cols-2 gap-3 text-xs text-slate-600">
+                        <div className="flex items-center gap-2">
+                          <FiMail />
+                          <span className="truncate">{user.email}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <FiPhone />
+                          <span>{user.phone}</span>
+                        </div>
+                        <div className="flex items-center gap-2 sm:col-span-2">
+                          <FiMapPin />
+                          <span className="line-clamp-2">{user.address}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col justify-between gap-3 text-sm text-slate-600">
+                      <div className="flex items-center justify-between">
+                        <span>Total Orders</span>
+                        <span className="font-semibold text-slate-900">{user.orders}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Status</span>
+                        <span className="inline-flex px-3 py-1 rounded-lg bg-slate-100 border border-slate-200 text-xs uppercase tracking-wide">
+                          {user.status}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Joined</span>
+                        <span>
+                          {user.createdAt
+                            ? new Date(user.createdAt).toLocaleDateString('en-PK', { dateStyle: 'medium' })
+                            : 'Unknown'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              ))}
+          </div>
+
+          {filteredUsers.length > PAGE_SIZE && (
+            <div className="flex items-center justify-center gap-3 pt-4">
+              <button
+                onClick={() => handlePageChange(currentPage - 1)}
+                className="px-4 py-2 bg-slate-100 border border-slate-200 rounded-lg text-sm text-slate-800 hover:bg-slate-200 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={currentPage === 1}
+              >
+                Previous
+              </button>
+              <span className="text-xs text-slate-600">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                onClick={() => handlePageChange(currentPage + 1)}
+                className="px-4 py-2 bg-slate-100 border border-slate-200 rounded-lg text-sm text-slate-800 hover:bg-slate-200 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={currentPage === totalPages}
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {/* User Details Modal */}
+      {selectedUser && (
+        <>
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50"
+            onClick={closeModal}
+          />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+            <div
+              className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto bg-white border border-slate-200 rounded-3xl shadow-2xl pointer-events-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="sticky top-0 bg-slate-50 border-b border-slate-200 p-6 flex items-center justify-between z-10">
+                <div>
+                  <h2 className="text-2xl font-semibold text-slate-900">User Details</h2>
+                  <p className="text-sm text-slate-600 mt-1">ID: {selectedUser.id}</p>
+                </div>
+                <button
+                  onClick={closeModal}
+                  className="p-2 rounded-lg hover:bg-slate-200/80 transition text-slate-700"
+                >
+                  <FiX className="text-xl" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-6">
+                {/* User Information */}
+                <section className="rounded-2xl border border-slate-200 bg-slate-50 p-6 space-y-4">
+                  <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                    <FiUser />
+                    Personal Information
+                  </h3>
+                  <div className="grid md:grid-cols-2 gap-4">
+                    <div>
+                      <p className="text-xs text-slate-400 mb-1">Full Name</p>
+                      <p className="text-slate-800 font-medium">{selectedUser.fullName}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-400 mb-1">Email</p>
+                      <p className="text-slate-800 flex items-center gap-2">
+                        <FiMail className="text-sm" />
+                        {selectedUser.email}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-400 mb-1">Phone</p>
+                      <p className="text-slate-800 flex items-center gap-2">
+                        <FiPhone className="text-sm" />
+                        {selectedUser.phone}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-400 mb-1">Status</p>
+                      <span className="inline-flex px-3 py-1 rounded-lg bg-slate-100 border border-slate-200 text-xs uppercase tracking-wide text-slate-800">
+                        {selectedUser.status}
+                      </span>
+                    </div>
+                    <div className="md:col-span-2">
+                      <p className="text-xs text-slate-400 mb-1">Address</p>
+                      <p className="text-slate-800 flex items-start gap-2">
+                        <FiMapPin className="text-sm mt-1" />
+                        {selectedUser.address}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-400 mb-1">Joined</p>
+                      <p className="text-slate-800 flex items-center gap-2">
+                        <FiCalendar className="text-sm" />
+                        {selectedUser.createdAt
+                          ? new Date(selectedUser.createdAt).toLocaleDateString('en-PK', {
+                              dateStyle: 'long',
+                            })
+                          : 'Unknown'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-400 mb-1">Total Orders</p>
+                      <p className="text-slate-800 font-semibold text-lg">{selectedUser.orders}</p>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Orders Section */}
+                <section className="rounded-2xl border border-slate-200 bg-slate-50 p-6 space-y-4">
+                  <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                    <FiPackage />
+                    Order History ({userOrders.length})
+                  </h3>
+
+                  {loadingOrders ? (
+                    <div className="flex items-center justify-center py-8">
+                      <FiRefreshCw className="animate-spin text-2xl text-slate-400" />
+                    </div>
+                  ) : userOrders.length === 0 ? (
+                    <div className="text-center py-8 text-slate-400">
+                      <FiPackage className="text-4xl mx-auto mb-2 opacity-50" />
+                      <p>No orders found for this user</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="space-y-3">
+                        {paginatedOrders.map((order) => {
+                          const status = normalizeStatus(order.status);
+                          const total = Number(order.total_amount || order.total || 0);
+                          const orderDate = order.created_at
+                            ? new Date(order.created_at).toLocaleString('en-PK', {
+                                dateStyle: 'medium',
+                                timeStyle: 'short',
+                              })
+                            : 'Unknown date';
+
+                          return (
+                            <div
+                              key={order.id}
+                              className="rounded-xl border border-slate-200 bg-slate-50 p-4 hover:bg-slate-200/80 transition"
+                            >
+                              <div className="flex items-start justify-between mb-3">
+                                <div>
+                                  <p className="text-slate-800 font-semibold">
+                                    Order #{order.id}
+                                  </p>
+                                  <p className="text-xs text-slate-400 mt-1 flex items-center gap-2">
+                                    <FiCalendar className="text-xs" />
+                                    {orderDate}
+                                  </p>
+                                </div>
+                                <div className="text-right">
+                                  <p className="text-slate-800 font-semibold flex items-center gap-2">
+                                    
+                                    {formatCurrency(total)}
+                                  </p>
+                                  <span
+                                    className={`inline-flex px-2 py-1 rounded text-xs uppercase mt-1 border ${getStatusColor(
+                                      status,
+                                    )}`}
+                                  >
+                                    {status}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {order.order_items && Array.isArray(order.order_items) && (
+                                <div className="mt-3 pt-3 border-t border-slate-200">
+                                  <p className="text-xs text-slate-400 mb-2">
+                                    Items ({order.order_items.length}):
+                                  </p>
+                                  <div className="space-y-1">
+                                    {order.order_items.slice(0, 3).map((item, idx) => (
+                                      <p
+                                        key={idx}
+                                        className="text-sm text-slate-600"
+                                      >
+                                        • {item.product_name || item.name || 'Unknown Product'} x
+                                        {item.quantity || 1}
+                                      </p>
+                                    ))}
+                                    {order.order_items.length > 3 && (
+                                      <p className="text-xs text-slate-400">
+                                        +{order.order_items.length - 3} more items
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Orders Pagination */}
+                      {userOrders.length > ORDERS_PER_PAGE && (
+                        <div className="flex items-center justify-center gap-3 pt-4 border-t border-slate-200">
+                          <button
+                            onClick={() => setOrdersPage((p) => Math.max(1, p - 1))}
+                            disabled={ordersPage === 1}
+                            className="px-4 py-2 bg-slate-100 border border-slate-200 rounded-lg text-sm text-slate-800 hover:bg-slate-200 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            Previous
+                          </button>
+                          <span className="text-xs text-slate-600">
+                            Page {ordersPage} of {totalOrdersPages}
+                          </span>
+                          <button
+                            onClick={() =>
+                              setOrdersPage((p) => Math.min(totalOrdersPages, p + 1))
+                            }
+                            disabled={ordersPage === totalOrdersPages}
+                            className="px-4 py-2 bg-slate-100 border border-slate-200 rounded-lg text-sm text-slate-800 hover:bg-slate-200 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </section>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {addModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-10">
+          <div
+            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            onClick={closeAddModal}
+            aria-hidden="true"
+          />
+          <div className="relative w-full max-w-lg rounded-3xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
+              <div>
+                <p className="text-xs uppercase tracking-[0.35em] text-slate-400">New account</p>
+                <h2 className="mt-1 text-xl font-semibold text-slate-900">Add customer</h2>
+              </div>
+              <button
+                type="button"
+                onClick={closeAddModal}
+                disabled={addSubmitting}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 text-slate-600 hover:bg-slate-100 transition disabled:opacity-60"
+              >
+                <FiX />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateCustomer} className="px-6 py-6 space-y-4">
+              <div className="grid sm:grid-cols-2 gap-4">
+                <label className="block">
+                  <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2 block">
+                    First name
+                  </span>
+                  <input
+                    type="text"
+                    value={newCustomer.firstName}
+                    onChange={handleNewCustomerChange('firstName')}
+                    className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                    placeholder="First name"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2 block">
+                    Last name
+                  </span>
+                  <input
+                    type="text"
+                    value={newCustomer.lastName}
+                    onChange={handleNewCustomerChange('lastName')}
+                    className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                    placeholder="Last name"
+                  />
+                </label>
+              </div>
+
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2 block">
+                  Email *
+                </span>
+                <input
+                  type="email"
+                  value={newCustomer.email}
+                  onChange={handleNewCustomerChange('email')}
+                  required
+                  className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                  placeholder="customer@email.com"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2 block">
+                  Password *
+                </span>
+                <input
+                  type="password"
+                  value={newCustomer.password}
+                  onChange={handleNewCustomerChange('password')}
+                  required
+                  minLength={6}
+                  className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                  placeholder="At least 6 characters"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2 block">
+                  Phone
+                </span>
+                <input
+                  type="tel"
+                  value={newCustomer.phone}
+                  onChange={handleNewCustomerChange('phone')}
+                  className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                  placeholder="0335 9909045"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2 block">
+                  Address
+                </span>
+                <textarea
+                  value={newCustomer.address}
+                  onChange={handleNewCustomerChange('address')}
+                  rows={3}
+                  className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/50 resize-none"
+                  placeholder="Delivery address"
+                />
+              </label>
+
+              {addError && (
+                <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+                  {addError}
+                </div>
+              )}
+
+              {addMessage && (
+                <div className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+                  {addMessage}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeAddModal}
+                  disabled={addSubmitting}
+                  className="px-5 py-2.5 rounded-lg border border-slate-300 text-sm font-semibold text-slate-800 hover:bg-slate-100 transition disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={addSubmitting}
+                  className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold text-white transition disabled:opacity-60"
+                >
+                  {addSubmitting ? 'Creating…' : 'Create customer'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default CmsCustomersPage;
+

@@ -1,0 +1,1009 @@
+'use client';
+
+import React, { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import {
+  FiShoppingCart,
+  FiTruck,
+  FiClock,
+  FiCheckCircle,
+  FiRefreshCw,
+  FiSearch,
+  FiFilter,
+  FiArrowLeft,
+  FiAlertTriangle,
+  FiPackage,
+  FiX,
+  FiTrash2,
+} from 'react-icons/fi';
+import { API_BASE } from '../../lib/apiBase';
+
+const STATUS_COLORS = {
+  pending: 'from-yellow-400/70 to-yellow-500/60',
+  processing: 'from-[#38bdf8]/70 to-[#6366f1]/60',
+  completed: 'from-[#22c55e]/70 to-[#16a34a]/60',
+  cancelled: 'from-red-500/70 to-red-600/60',
+};
+
+const STATUS_BADGE_BG = {
+  pending: 'from-yellow-500 to-yellow-600',
+  processing: 'from-blue-600 to-blue-700',
+  completed: 'from-emerald-500 to-emerald-700',
+  cancelled: 'from-red-600 to-red-700',
+};
+
+const STATUS_BADGE_SHADOW = {
+  pending: 'shadow-yellow-500/40',
+  processing: 'shadow-blue-500/25',
+  completed: 'shadow-[#16a34a]/40',
+  cancelled: 'shadow-red-500/40',
+};
+
+const STATUS_OPTIONS = [
+  { value: 'pending', label: 'Pending' },
+  { value: 'processing', label: 'Processing' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
+
+const formatCurrency = (value) => {
+  const numeric = Number(value || 0);
+  return `PKR ${numeric.toLocaleString('en-PK')}`;
+};
+
+const parseAddressLike = (value) => {
+  if (!value) return null;
+
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch (error) {
+      // ignore JSON parse error; treat as plain string
+    }
+  }
+
+  return null;
+};
+
+const normalizeStatus = (status) => {
+  if (!status) return 'pending';
+  const normalized = status.toString().toLowerCase();
+  if (normalized.includes('cancel')) return 'cancelled';
+  if (normalized.includes('complete')) return 'completed';
+  if (normalized.includes('process')) return 'processing';
+  return 'pending';
+};
+
+const extractCustomerName = (order) => {
+  if (!order) return 'Guest User';
+
+  const shippingAddress = parseAddressLike(order.shipping_address);
+  const billingAddress = parseAddressLike(order.billing_address);
+
+  const addressName =
+    shippingAddress?.name ||
+    billingAddress?.name ||
+    (Array.isArray(order.order_items) &&
+      order.order_items.length > 0 &&
+      parseAddressLike(order.order_items[0]?.shipping)?.name);
+  if (addressName && addressName.trim()) {
+    return addressName.trim();
+  }
+
+  const orderName =
+    order.customer_name ||
+    [order.first_name, order.last_name].filter(Boolean).join(' ') ||
+    order.user_name ||
+    order.user_email;
+  if (orderName && orderName.trim()) return orderName.trim();
+
+  const userName =
+    order.user?.full_name ||
+    [order.user?.first_name, order.user?.last_name].filter(Boolean).join(' ') ||
+    order.user?.name ||
+    order.user?.email;
+  if (userName && userName.trim()) return userName.trim();
+
+  return 'Guest User';
+};
+
+const extractEmail = (order) => {
+  if (!order) return 'Not provided';
+
+  const shippingAddress = parseAddressLike(order.shipping_address);
+  const billingAddress = parseAddressLike(order.billing_address);
+
+  const addressEmail = shippingAddress?.email || billingAddress?.email;
+  if (addressEmail && addressEmail.trim()) {
+    return addressEmail.trim();
+  }
+
+  const email =
+    order.customer_email ||
+    order.user_email ||
+    order.email ||
+    order.user?.email;
+  return (email && String(email).trim()) || 'Not provided';
+};
+
+const extractPhone = (order) => {
+  if (!order) return '';
+  const shippingAddress = parseAddressLike(order.shipping_address);
+  const billingAddress = parseAddressLike(order.billing_address);
+  const fromAddr = shippingAddress?.phone || billingAddress?.phone;
+  if (fromAddr && String(fromAddr).trim()) return String(fromAddr).trim();
+  const p = order.customer_phone || order.user_phone || order.phone || order.user?.phone;
+  return (p && String(p).trim()) || '';
+};
+
+const sanitizeOrder = (order) => {
+  if (!order) return null;
+  const status = normalizeStatus(order.status || order.state || order.order_status);
+
+  return {
+    id: order.id?.toString?.() ?? order.id,
+    trackingNumber: order.tracking_number || null,
+    voucherCode: order.voucher_code || null,
+    voucherDiscount: Number(order.discount) || 0,
+    orderNumber: order.order_number || order.id || `ORDER-${order.id}`,
+    customerName: extractCustomerName(order),
+    email: extractEmail(order),
+    phone: extractPhone(order),
+    total: Number(order.totalamount ?? order.total_amount ?? order.total) || 0,
+    itemCount: Number(order.itemcount ?? order.items?.length ?? 1) || 1,
+    createdAt: order.created_at || order.createdat || order.createdAt || null,
+    status,
+    isGuest: order.user_id == null || order.user_id === '',
+    raw: order,
+  };
+};
+
+const normalizeAddress = (address) => {
+  if (!address) {
+    return {
+      lines: [],
+      phone: '',
+      email: '',
+      name: '',
+    };
+  }
+
+  if (typeof address === 'string') {
+    try {
+      const parsed = JSON.parse(address);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return normalizeAddress(parsed);
+      }
+    } catch (error) {
+      // ignore parse error; fallback to splitting
+    }
+
+    const lines = address
+      .split(/\r?\n|,/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    return {
+      lines,
+      phone: '',
+      email: '',
+      name: '',
+    };
+  }
+
+  const cityLine = [address.city, address.state, address.postal_code]
+    .filter((part) => typeof part === 'string' && part.trim())
+    .join(', ');
+
+  const lines = [
+    address.line1,
+    address.line2,
+    cityLine,
+    address.country,
+  ]
+    .filter((line) => typeof line === 'string' && line.trim())
+    .map((line) => line.trim());
+
+  return {
+    lines,
+    phone: typeof address.phone === 'string' ? address.phone : '',
+    email: typeof address.email === 'string' ? address.email : '',
+    name: typeof address.name === 'string' ? address.name : '',
+  };
+};
+
+const sanitizeOrderDetail = (order, fallback) => {
+  const base = sanitizeOrder(order || fallback?.raw || fallback);
+
+  const detailSource = order || fallback?.raw || {};
+
+  const items = Array.isArray(detailSource.order_items)
+    ? detailSource.order_items.map((item) => ({
+        id: item.id?.toString?.() ?? item.id,
+        name: item.name || item.product_name || 'Unnamed item',
+        quantity: Number(item.quantity || item.qty || 1),
+        price: Number(item.price || item.unit_price || 0),
+        total: Number(item.price || item.unit_price || 0) * Number(item.quantity || item.qty || 1),
+      }))
+    : [];
+
+  return {
+    ...base,
+    items,
+    subtotal: Number(detailSource.subtotal ?? detailSource.total_without_tax ?? 0),
+    tax: Number(detailSource.tax ?? detailSource.tax_amount ?? 0),
+    shippingCost: Number(detailSource.shipping ?? detailSource.shipping_cost ?? 0),
+    paymentMethod: detailSource.payment_method || detailSource.paymentmethod || 'Not provided',
+    notes: detailSource.order_notes || detailSource.notes || '',
+    shippingAddress: normalizeAddress(detailSource.shipping_address),
+    billingAddress: normalizeAddress(detailSource.billing_address),
+  };
+};
+
+const CmsOrdersPage = () => {
+  const router = useRouter();
+  const [cmsUser, setCmsUser] = useState(null);
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailOrder, setDetailOrder] = useState(null);
+  const [detailStatus, setDetailStatus] = useState('pending');
+  const [detailError, setDetailError] = useState('');
+  const [detailMessage, setDetailMessage] = useState('');
+  const [detailSaving, setDetailSaving] = useState(false);
+  const [detailDeleting, setDetailDeleting] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const storedUser = window.localStorage.getItem('cmsUser');
+    const storedSession = window.localStorage.getItem('cmsSession');
+
+    if (!storedUser || !storedSession) {
+      router.replace('/cms/auth/login');
+      return;
+    }
+
+    try {
+      const parsedUser = JSON.parse(storedUser);
+      
+      // Check if user has access to orders page
+      // Ensure accesspages is an array
+      if (!Array.isArray(parsedUser.accesspages)) {
+        parsedUser.accesspages = [];
+      }
+      
+      // Admin users always have access, others need orders in accesspages
+      if (parsedUser.role !== 'admin') {
+        const accessPages = parsedUser.accesspages || [];
+        if (!accessPages.includes('orders')) {
+          router.replace('/cms/auth/login');
+          return;
+        }
+      }
+      setCmsUser(parsedUser);
+    } catch (err) {
+      console.error('Failed to parse CMS user', err);
+      router.replace('/cms/auth/login');
+    }
+  }, [router]);
+
+  useEffect(() => {
+    const fetchOrders = async () => {
+      try {
+        setLoading(true);
+        setError('');
+        const response = await fetch(`${API_BASE}/api/orders`);
+        if (!response.ok) throw new Error('Failed to load orders');
+        const data = await response.json();
+        const normalized = Array.isArray(data)
+          ? data.map((order) => sanitizeOrder(order)).filter(Boolean)
+          : [];
+        setOrders(normalized);
+      } catch (err) {
+        console.error('CMS orders fetch error:', err);
+        setError(err.message || 'Failed to load orders.');
+        setOrders([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchOrders();
+  }, []);
+
+  const filteredOrders = useMemo(() => {
+    return orders.filter((order) => {
+      const matchesStatus = statusFilter === 'all' ? true : order.status === statusFilter;
+      const q = searchTerm.trim().toLowerCase();
+      const matchesSearch = q
+        ? [order.trackingNumber, order.orderNumber, order.id, order.customerName, order.email, order.phone]
+            .filter(Boolean)
+            .some((field) => String(field).toLowerCase().includes(q))
+        : true;
+      return matchesStatus && matchesSearch;
+    });
+  }, [orders, statusFilter, searchTerm]);
+
+  const stats = useMemo(() => {
+    const total = orders.length;
+    const pending = orders.filter((order) => order.status === 'pending').length;
+    const processing = orders.filter((order) => order.status === 'processing').length;
+    const completed = orders.filter((order) => order.status === 'completed').length;
+    const revenue = orders.reduce((sum, order) => {
+      if (order.status !== 'completed') return sum;
+      const amount = Number(order.total);
+      return sum + (Number.isFinite(amount) ? amount : 0);
+    }, 0);
+
+    return {
+      total,
+      pending,
+      processing,
+      completed,
+      revenue,
+    };
+  }, [orders]);
+
+  const closeDetailModal = () => {
+    if (detailSaving || detailDeleting) return;
+    setDetailModalOpen(false);
+    setDetailOrder(null);
+    setDetailStatus('pending');
+    setDetailError('');
+    setDetailMessage('');
+    setDetailLoading(false);
+  };
+
+  const openDetailModal = async (orderSummary) => {
+    const summarySanitized = sanitizeOrder(orderSummary);
+    setDetailModalOpen(true);
+    setDetailLoading(true);
+    setDetailError('');
+    setDetailMessage('');
+    setDetailSaving(false);
+    setDetailOrder(sanitizeOrderDetail(orderSummary?.raw, summarySanitized));
+    setDetailStatus(summarySanitized?.status || 'pending');
+
+    try {
+      const response = await fetch(`${API_BASE}/api/orders/${orderSummary.id}`);
+      if (!response.ok) {
+        throw new Error('Failed to load order details.');
+      }
+      const data = await response.json();
+      const detailed = sanitizeOrderDetail(data, summarySanitized);
+      setDetailOrder(detailed);
+      setDetailStatus(detailed.status);
+    } catch (err) {
+      console.error('Order detail fetch error:', err);
+      setDetailError(err.message || 'Failed to load order details.');
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const handleDetailStatusChange = (event) => {
+    setDetailStatus(event.target.value);
+    setDetailMessage('');
+    setDetailError('');
+  };
+
+  const handleDetailStatusUpdate = async () => {
+    if (!detailOrder) return;
+
+    const nextStatus = detailStatus || detailOrder.status;
+    if (!nextStatus) return;
+
+    setDetailSaving(true);
+    setDetailError('');
+    setDetailMessage('');
+
+    try {
+      const response = await fetch(`${API_BASE}/api/orders/${detailOrder.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to update order status.');
+      }
+
+      const updated = sanitizeOrderDetail(payload, detailOrder);
+      setDetailOrder(updated);
+      setDetailStatus(updated.status);
+      setDetailMessage('Status updated successfully.');
+
+      setOrders((prev) =>
+        prev.map((order) =>
+          order.id === updated.id ? { ...order, status: updated.status, raw: { ...(order.raw || {}), status: updated.status } } : order,
+        ),
+      );
+    } catch (err) {
+      console.error('Order status update error:', err);
+      setDetailError(err.message || 'Failed to update order status.');
+    } finally {
+      setDetailSaving(false);
+    }
+  };
+
+  const handleDeleteOrder = async (orderId, orderLabel) => {
+    if (!orderId) return;
+    if (
+      !window.confirm(
+        `Permanently delete cancelled order ${orderLabel || `#${orderId}`}? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+
+    setDetailDeleting(true);
+    setDetailError('');
+    setDetailMessage('');
+
+    try {
+      const response = await fetch(`${API_BASE}/api/orders/${orderId}`, {
+        method: 'DELETE',
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to delete order.');
+      }
+
+      setOrders((prev) => prev.filter((order) => String(order.id) !== String(orderId)));
+      setDetailDeleting(false);
+      setDetailModalOpen(false);
+      setDetailOrder(null);
+      setDetailStatus('pending');
+      setDetailError('');
+      setDetailMessage('');
+    } catch (err) {
+      console.error('Order delete error:', err);
+      setDetailError(err.message || 'Failed to delete order.');
+      setDetailDeleting(false);
+    }
+  };
+
+  const renderAddressSection = (title, address) => (
+    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2">
+      <h4 className="text-xs font-semibold text-slate-900/80 uppercase tracking-wide">{title}</h4>
+      {address?.name && <p className="text-sm font-semibold text-slate-900">{address.name}</p>}
+      {address?.lines?.length ? (
+        <div className="text-xs text-slate-600 space-y-1">
+          {address.lines.map((line, index) => (
+            <p key={`${title}-line-${index}`}>{line}</p>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-slate-500">Not provided</p>
+      )}
+      {(address?.phone || address?.email) && (
+        <div className="text-xs text-slate-500 space-y-1">
+          {address.phone && <p>Phone: {address.phone}</p>}
+          {address.email && <p>Email: {address.email}</p>}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <>
+      <div className="relative min-h-screen text-slate-900">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(99,102,241,0.25),transparent_55%)] opacity-80 pointer-events-none" />
+
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 py-10 space-y-8">
+        <header className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="inline-flex items-center gap-2 text-xs font-semibold tracking-[0.35em] uppercase text-slate-600">
+              <FiShoppingCart className="text-blue-600" /> Orders
+            </p>
+            <h1 className="mt-2 text-3xl font-semibold text-slate-900">Order Management</h1>
+            <p className="mt-1 text-sm text-slate-600">
+              Track pending, processing, and completed orders. Resolve fulfillment tasks and update statuses in real-time.
+            </p>
+          </div>
+          <div className="flex gap-3 items-center">
+            <Link
+              href="/cms/dashboard"
+              className="inline-flex items-center gap-2 px-4 py-2.5 border border-slate-200 rounded-lg text-sm font-semibold text-slate-800 hover:bg-slate-100 transition shadow-lg shadow-black/10"
+            >
+              <FiArrowLeft />
+              Back to dashboard
+            </Link>
+            <button
+              onClick={() => router.refresh()}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-linear-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white text-sm font-semibold rounded-lg transition shadow-lg shadow-blue-500/20"
+            >
+              <FiRefreshCw className={loading ? 'animate-spin' : ''} />
+              Refresh
+            </button>
+          </div>
+        </header>
+
+        <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5">
+          <div className="rounded-2xl border border-slate-200 bg-linear-to-br from-blue-600 to-blue-700 p-6 shadow-xl">
+            <p className="text-xs uppercase tracking-wide text-blue-100">Total Orders</p>
+            <p className="mt-3 text-3xl font-bold text-white">{stats.total}</p>
+            <p className="text-xs text-slate-600 mt-1">Orders synced from Supabase</p>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-100 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-600">Pending</p>
+                <p className="mt-3 text-2xl font-semibold text-slate-900">{stats.pending}</p>
+              </div>
+              <span className="h-11 w-11 rounded-full bg-linear-to-br from-yellow-200/80 to-yellow-100/40 flex items-center justify-center text-yellow-600">
+                <FiClock />
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-2">Awaiting payment or fulfillment</p>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-100 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-600">Processing</p>
+                <p className="mt-3 text-2xl font-semibold text-slate-900">{stats.processing}</p>
+              </div>
+              <span className="h-11 w-11 rounded-full bg-linear-to-br from-blue-500/30 to-blue-500/10 flex items-center justify-center text-blue-600">
+                <FiTruck />
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-2">Orders currently being fulfilled</p>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-100 p-6 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-600">Revenue</p>
+                <p className="mt-3 text-2xl font-semibold text-slate-900">
+                  {stats.revenue > 0 ? `PKR ${stats.revenue.toLocaleString('en-PK')}` : 'n/a'}
+                </p>
+              </div>
+              <span className="h-11 w-11 rounded-full bg-linear-to-br from-[#22c55e]/30 to-[#16a34a]/10 flex items-center justify-center text-[#22c55e]">
+                <FiCheckCircle />
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-2">Total from completed orders only</p>
+          </div>
+        </section>
+
+        <section className="rounded-3xl border border-slate-200 bg-slate-100 backdrop-blur-3xl shadow-2xl p-6 sm:p-8 space-y-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-3 bg-slate-100 border border-slate-200 rounded-xl px-4 py-3">
+              <FiSearch className="text-slate-600" />
+              <input
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                placeholder="Search by tracking #, order ID, or customer..."
+                className="bg-transparent text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none"
+              />
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={() => setStatusFilter('all')}
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition inline-flex items-center gap-2 ${
+                  statusFilter === 'all'
+                    ? 'bg-linear-to-r from-blue-600 to-blue-700 text-white shadow-lg shadow-blue-500/20'
+                    : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <FiFilter />
+                All
+              </button>
+              <button
+                onClick={() => setStatusFilter('pending')}
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
+                  statusFilter === 'pending'
+                    ? 'bg-linear-to-r from-yellow-500 to-yellow-600 text-white shadow-lg shadow-yellow-500/25'
+                    : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                Pending
+              </button>
+              <button
+                onClick={() => setStatusFilter('processing')}
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
+                  statusFilter === 'processing'
+                    ? 'bg-linear-to-r from-blue-600 to-blue-700 text-white shadow-lg shadow-blue-500/20'
+                    : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                Processing
+              </button>
+              <button
+                onClick={() => setStatusFilter('completed')}
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
+                  statusFilter === 'completed'
+                    ? 'bg-linear-to-r from-emerald-500 to-emerald-700 text-white shadow-lg shadow-emerald-500/20'
+                    : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                Completed
+              </button>
+              <button
+                onClick={() => setStatusFilter('cancelled')}
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
+                  statusFilter === 'cancelled'
+                    ? 'bg-linear-to-r from-red-600 to-red-700 text-white shadow-lg shadow-red-500/25'
+                    : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                Cancelled
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-5">
+            {loading && (
+              <div className="flex flex-col items-center justify-center gap-3 py-20 text-slate-600">
+                <FiRefreshCw className="animate-spin text-2xl" />
+                <p className="text-sm">Loading order data...</p>
+              </div>
+            )}
+
+            {error && !loading && (
+              <div className="border border-red-400/30 bg-red-500/10 text-red-800 rounded-2xl p-6 flex gap-3 items-start">
+                <FiAlertTriangle className="mt-1 text-xl" />
+                <div>
+                  <p className="text-sm font-semibold">Unable to load orders</p>
+                  <p className="text-xs mt-1">{error}</p>
+                </div>
+              </div>
+            )}
+
+            {!loading && !error && filteredOrders.length === 0 && (
+              <div className="border border-slate-200 bg-slate-50 text-slate-700 rounded-2xl p-6">
+                <p className="text-sm font-semibold">No orders match your filters.</p>
+                <p className="text-xs mt-1">Try adjusting your search or status selection.</p>
+              </div>
+            )}
+
+            {!loading &&
+              !error &&
+              filteredOrders.map((order) => {
+                const gradient = STATUS_COLORS[order.status] || STATUS_COLORS.pending;
+                return (
+                  <article
+                    key={order.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => openDetailModal(order)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openDetailModal(order);
+                      }
+                    }}
+                    className="relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 backdrop-blur-xl shadow-xl transition transform hover:-translate-y-1 hover:shadow-2xl cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                  >
+                    <div className={`absolute inset-0 bg-linear-to-br ${gradient} opacity-20 pointer-events-none`} />
+                    <div className="relative p-6 grid gap-6 md:grid-cols-[1.5fr_1fr]">
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-3">
+                          <span className="inline-flex items-center gap-2 text-xs font-semibold px-3 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+                            <FiPackage />
+                            {order.trackingNumber ? (
+                              <>Tracking {order.trackingNumber}</>
+                            ) : (
+                              <>Order #{order.orderNumber}</>
+                            )}
+                          </span>
+                          <span className="text-xs text-slate-500">
+                            {order.createdAt
+                              ? new Date(order.createdAt).toLocaleString('en-PK', {
+                                  dateStyle: 'medium',
+                                  timeStyle: 'short',
+                                })
+                              : 'Unknown date'}
+                          </span>
+                        </div>
+
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900">{order.customerName}</p>
+                          <p className="text-xs text-slate-600">{order.email}</p>
+                          {order.phone ? (
+                            <p className="text-xs text-slate-600">Phone: {order.phone}</p>
+                          ) : null}
+                          {order.isGuest ? (
+                            <p className="text-[10px] uppercase tracking-wide text-amber-800 mt-1">
+                              Guest checkout
+                            </p>
+                          ) : null}
+                        </div>
+
+                        <p className="text-xs text-slate-600 max-w-2xl">
+                          Order contains {order.itemCount} item{order.itemCount === 1 ? '' : 's'} with a total value of{' '}
+                          <span className="font-semibold text-slate-900">{formatCurrency(order.total)}</span>. Use the CMS dashboard to update fulfillment status, track analytics, and manage customer communications.
+                        </p>
+                      </div>
+
+                      <div className="flex flex-col justify-between gap-4 text-sm text-slate-600">
+                        <div className="flex items-center justify-between">
+                          <span>Status</span>
+                          <span
+                            className={`inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-linear-to-r ${
+                              STATUS_BADGE_BG[order.status] || 'from-blue-600 to-blue-700'
+                            } text-white font-semibold uppercase text-xs tracking-wide shadow-md ${
+                              STATUS_BADGE_SHADOW[order.status] || 'shadow-blue-500/25'
+                            }`}
+                          >
+                            {order.status.toUpperCase()}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                          <span>Total</span>
+                          <span className="font-semibold text-slate-900">{formatCurrency(order.total)}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span>Items</span>
+                          <span>{order.itemCount}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span>Tracking #</span>
+                          <span className="text-xs font-mono text-slate-600">
+                            {order.trackingNumber || '—'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span>Order ID</span>
+                          <span className="text-xs text-slate-600">{order.id}</span>
+                        </div>
+                        {order.status === 'cancelled' && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleDeleteOrder(
+                                order.id,
+                                order.trackingNumber || `#${order.orderNumber}`,
+                              );
+                            }}
+                            disabled={detailDeleting}
+                            className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 transition disabled:opacity-60"
+                          >
+                            <FiTrash2 />
+                            Delete order
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+          </div>
+        </section>
+      </div>
+    </div>
+      {detailModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-10">
+          <div
+            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            aria-hidden="true"
+            onClick={closeDetailModal}
+          />
+          <div className="relative w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white shadow-2xl shadow-slate-300/40">
+            <div className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-slate-200 bg-slate-50 px-6 py-5">
+              <div>
+                <p className="flex items-center gap-2 text-xs font-semibold tracking-[0.35em] uppercase text-slate-600">
+                  <FiShoppingCart className="text-blue-600" />
+                  Order Detail
+                </p>
+                <h2 className="mt-2 text-2xl font-semibold text-slate-900">
+                  {detailOrder?.trackingNumber
+                    ? detailOrder.trackingNumber
+                    : `Order #${detailOrder?.orderNumber || detailOrder?.id || '—'}`}
+                </h2>
+                {detailOrder?.trackingNumber && (
+                  <p className="text-xs text-slate-500 mt-1 font-mono">
+                    Internal order ID: #{detailOrder.id}
+                  </p>
+                )}
+                <p className="text-xs text-slate-400 mt-1">
+                  Placed on{' '}
+                  {detailOrder?.createdAt
+                    ? new Date(detailOrder.createdAt).toLocaleString('en-PK', {
+                        dateStyle: 'medium',
+                        timeStyle: 'short',
+                      })
+                    : 'Unknown date'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeDetailModal}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 text-slate-600 hover:text-slate-800 hover:bg-slate-100 transition disabled:opacity-60"
+                disabled={detailSaving || detailDeleting}
+              >
+                <FiX className="text-lg" />
+                <span className="sr-only">Close modal</span>
+              </button>
+            </div>
+
+            {detailLoading ? (
+              <div className="px-6 py-16 text-center text-slate-600">
+                <FiRefreshCw className="mx-auto mb-4 text-2xl animate-spin" />
+                Loading order details...
+              </div>
+            ) : detailOrder ? (
+              <div className="px-6 py-8 space-y-8">
+                <div className="grid grid-cols-1 lg:grid-cols-[1.5fr_1fr] gap-6">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Status</span>
+                      <span
+                        className={`inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-linear-to-r ${
+                          STATUS_BADGE_BG[detailOrder.status] || 'from-blue-600 to-blue-700'
+                        } text-white font-semibold uppercase text-xs tracking-wide shadow-md ${
+                          STATUS_BADGE_SHADOW[detailOrder.status] || 'shadow-blue-500/25'
+                        }`}
+                      >
+                        {detailOrder.status.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+                      <p className="text-slate-500 text-xs uppercase tracking-wide">Tracking number</p>
+                      <p className="mt-1 font-mono text-base font-semibold text-slate-900">
+                        {detailOrder.trackingNumber || 'Not assigned (legacy order)'}
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm text-slate-600">
+                      <div className="space-y-1">
+                        <p className="text-slate-500 text-xs uppercase tracking-wide">Customer</p>
+                        {detailOrder.isGuest ? (
+                          <span className="inline-block text-[10px] uppercase tracking-wide text-amber-800 bg-amber-100 px-2 py-0.5 rounded mb-1">
+                            Guest checkout
+                          </span>
+                        ) : null}
+                        <p className="font-semibold text-slate-900">{detailOrder.customerName}</p>
+                        <p className="text-xs text-slate-500">{detailOrder.email}</p>
+                        {detailOrder.phone ? (
+                          <p className="text-xs text-slate-500">Phone: {detailOrder.phone}</p>
+                        ) : null}
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-slate-500 text-xs uppercase tracking-wide">Financials</p>
+                        <p>Subtotal: {formatCurrency(detailOrder.subtotal)}</p>
+                        {detailOrder.voucherCode ? (
+                          <p>
+                            Voucher ({detailOrder.voucherCode}): −{formatCurrency(detailOrder.voucherDiscount)}
+                          </p>
+                        ) : null}
+                        <p>Tax: {formatCurrency(detailOrder.tax)}</p>
+                        <p>Shipping: {formatCurrency(detailOrder.shippingCost)}</p>
+                        <p className="font-semibold text-slate-900">Total: {formatCurrency(detailOrder.total)}</p>
+                      </div>
+                    </div>
+                    <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="flex items-center justify-between text-xs text-slate-500 uppercase tracking-wide">
+                        <span>Change Status</span>
+                        {detailSaving && (
+                          <span className="inline-flex items-center gap-1 text-blue-600">
+                            <FiRefreshCw className="animate-spin" /> Saving...
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:gap-3 gap-2">
+                        <select
+                          value={detailStatus}
+                          onChange={handleDetailStatusChange}
+                          disabled={detailSaving}
+                          className="w-full rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-60"
+                        >
+                          {STATUS_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value} className="text-black">
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={handleDetailStatusUpdate}
+                          disabled={detailSaving}
+                          className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-linear-to-r from-blue-600 to-blue-700 text-sm font-semibold text-slate-900 shadow-md shadow-blue-500/25 hover:from-blue-700 hover:to-blue-800 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          Update
+                        </button>
+                      </div>
+                      {detailError && (
+                        <p className="text-xs text-red-300 bg-red-500/15 border border-red-400/30 rounded-lg px-3 py-2">
+                          {detailError}
+                        </p>
+                      )}
+                      {detailMessage && (
+                        <p className="text-xs text-emerald-300 bg-emerald-500/15 border border-emerald-400/30 rounded-lg px-3 py-2">
+                          {detailMessage}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="space-y-4 text-sm text-slate-600">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2">
+                      <h4 className="text-xs font-semibold text-slate-900/80 uppercase tracking-wide">Payment</h4>
+                      <p className="text-sm text-slate-800">{detailOrder.paymentMethod || 'Not provided'}</p>
+                      {detailOrder.notes && (
+                        <p className="text-xs text-slate-500">
+                          Notes: <span className="text-slate-600">{detailOrder.notes}</span>
+                        </p>
+                      )}
+                    </div>
+                    {renderAddressSection('Shipping Address', detailOrder.shippingAddress)}
+                    {renderAddressSection('Billing Address', detailOrder.billingAddress)}
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-slate-900 uppercase tracking-wide">Items</h3>
+                  {detailOrder.items && detailOrder.items.length ? (
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 divide-y divide-white/10">
+                      {detailOrder.items.map((item) => (
+                        <div key={item.id || `${item.name}-${item.productId}`} className="flex items-center justify-between px-5 py-3 text-sm text-slate-600">
+                          <div>
+                            <p className="font-semibold text-slate-900">{item.name}</p>
+                            <p className="text-xs text-slate-500">Quantity: {item.quantity}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="font-semibold text-slate-900">{formatCurrency(item.total || item.price)}</p>
+                            <p className="text-xs text-slate-500">Unit: {formatCurrency(item.price)}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-500">No order items found.</p>
+                  )}
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:justify-end gap-3">
+                  {detailOrder?.status === 'cancelled' && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDeleteOrder(
+                          detailOrder.id,
+                          detailOrder.trackingNumber || `#${detailOrder.orderNumber || detailOrder.id}`,
+                        )
+                      }
+                      disabled={detailSaving || detailDeleting}
+                      className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg border border-red-300 bg-red-50 text-sm font-semibold text-red-700 hover:bg-red-100 transition disabled:opacity-60"
+                    >
+                      <FiTrash2 />
+                      {detailDeleting ? 'Deleting…' : 'Delete order'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={closeDetailModal}
+                    disabled={detailSaving || detailDeleting}
+                    className="px-5 py-2.5 rounded-lg border border-slate-300 text-sm font-semibold text-slate-800 hover:bg-slate-100 transition disabled:opacity-60"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="px-6 py-16 text-center text-slate-600">
+                Failed to load order information.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+};
+
+export default CmsOrdersPage;
+
